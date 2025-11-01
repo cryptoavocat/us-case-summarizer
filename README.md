@@ -1,29 +1,145 @@
-# How to Search the Caselaw Dataset
+# US Caselaw Pinecone Search Toolkit
 
-This document explains how to use the provided Python script to search the caselaw dataset stored in Pinecone.
+This repository contains a lightweight Python toolkit for searching your US caselaw
+Pinecone index and optionally generating short AI summaries of the returned
+opinions. It includes a reusable `PineconeSearcher` class, a CLI entry point, and
+setup documentation to help you bring your own embeddings and sparse BM25 model.
+
+## Features
+
+- 🔍 Hybrid dense + sparse (BM25) retrieval against an existing Pinecone index.
+- 🧠 Optional OpenAI-powered summaries for each result.
+- 🧰 Configurable through environment variables so it fits into your existing
+  Colab or local workflow.
+- 🗂️ Metadata filtering to narrow results by court, date, jurisdiction, or any
+  other attributes stored alongside your vectors.
+
+## Repository Layout
+
+```
+.
+├── README.md                ← You're here
+├── requirements.txt         ← Python dependencies
+└── case_summarizer/
+    ├── __init__.py
+    └── search.py            ← Pinecone search + summarization utilities
+```
 
 ## Prerequisites
 
-Before running the search script, ensure you have the following:
+1. **Python environment** – The CLI and examples assume Python 3.9+.
+2. **Dependencies** – Install packages with:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. **API keys** – Store these as environment variables before running any
+   commands:
+   - `OPENAI_API_KEY`
+   - `US_PINECONE_KEY`
+4. **Pinecone index** – A populated Pinecone index that already contains your
+   caselaw embeddings. Set `PINECONE_INDEX` (defaults to `caselaw`) and, if you
+   are on a pod-based deployment, `PINECONE_HOST`.
+5. **BM25 encoder (optional but recommended)** – A pickled
+   `pinecone_text.sparse.BM25Encoder` trained on the caselaw corpus. Upload the
+   pickle to your environment (for example, Google Drive) and set
+   `BM25_ENCODER_PATH` to its location. If omitted or missing, the tool falls
+   back to dense-only retrieval.
 
-1.  **Google Colab Environment:** The script is designed to run in a Google Colab environment.
-2.  **Required Libraries:** The script uses `openai`, `pinecone`, `pinecone-text`, `tiktoken`, `tqdm`, `tenacity`, `orjson`, and `nltk`. These should be installed in your Colab environment.
-3.  **Google Drive Mounted:** The script expects the BM25 encoder model to be stored in your Google Drive. Ensure your Drive is mounted in Colab.
-4.  **API Keys:**
-    *   **OpenAI API Key:** For dense embeddings. Store this in Colab secrets named `OPENAI_API_KEY`.
-    *   **Pinecone API Key:** For accessing your Pinecone index. Store this in Colab secrets named `US_PINECONE_KEY`.
-5.  **BM25 Encoder Model:** The script requires a pre-trained and saved BM25 encoder model. The default path is set in the `CONFIG`. Ensure this file exists at the specified location (`/content/drive/MyDrive/caselaw_pipeline/frozen_bm25.pkl`). If not, you'll need to run the BM25 fitting step (usually a previous step in the overall pipeline) to generate this file.
-6.  **Pinecone Index:** A Pinecone index named `caselaw` (as per `CONFIG`) should exist and be populated with your caselaw data. The script connects to the index host specified in the `CONFIG`.
+## Running a Search
 
-## How to Use the Script
+Execute the search CLI with your query:
 
-1.  **Open the Notebook:** Open the Google Colab notebook containing the search script.
-2.  **Ensure Prerequisites are Met:** Verify that all prerequisites listed above are satisfied (libraries installed, Drive mounted, API keys set in secrets, BM25 model available, Pinecone index exists).
-3.  **Locate the Search Script Cell:** Identify the code cell containing the comprehensive search script (the one with imports, configuration, functions, and the `if __name__ == "__main__":` block).
-4.  **Define Your Query:** In the `if __name__ == "__main__":` block, modify the `query` variable to the text you want to search for.
+```bash
+python -m case_summarizer.search --query "Miranda warnings" --top-k 5
+```
 
-## Using Metadata Filters
+You will receive a JSON response containing the matched vectors, their scores,
+IDs, and metadata (unless you pass `--no-metadata`).
 
-You can refine your search results by applying metadata filters. The `index.query` method accepts a `filter` argument, which is a dictionary specifying the filtering conditions.
+### Using Metadata Filters
 
-Here's how you can add a metadata filter to your search:
+Metadata filters let you narrow the results to specific courts, jurisdictions,
+or time periods. Provide filters as JSON via the `--filter` flag. Here are a few
+examples:
+
+```bash
+# Limit to Supreme Court cases
+python -m case_summarizer.search \
+    --query "qualified immunity" \
+    --filter '{"court": "Supreme Court of the United States"}'
+
+# Restrict to decisions issued after 2000 (assuming you stored year metadata)
+python -m case_summarizer.search \
+    --query "habeas corpus" \
+    --filter '{"year": {"$gte": 2000}}'
+
+# Combine multiple constraints
+python -m case_summarizer.search \
+    --query "environmental regulation" \
+    --filter '{"jurisdiction": "Federal", "year": {"$between": [1990, 2010]}}'
+```
+
+> **Tip:** Pinecone filter syntax mirrors Mongo-style operators. Supported
+> operators include `$in`, `$gte`, `$lte`, `$between`, `$exists`, `$ne`, and
+> more. Consult the [Pinecone filter documentation](https://docs.pinecone.io/docs/metadata-filtering)
+> for a full reference.
+
+### Summarizing Retrieved Cases
+
+To summarize a case body returned from the search results, pass the opinion text
+to `case_summarizer.summarize_case`:
+
+```python
+from case_summarizer import PineconeSearcher, summarize_case
+
+searcher = PineconeSearcher()
+response = searcher.search("Miranda rights", top_k=3)
+for match in response["matches"]:
+    summary = summarize_case(match["metadata"].get("opinion_text", ""))
+    print(match["id"], summary)
+```
+
+The summary helper calls the OpenAI Chat Completions API using the model defined
+in the `OPENAI_SUMMARY_MODEL` environment variable (default `gpt-4o-mini`).
+
+## Configuration Reference
+
+The `SearchConfig` dataclass reads the following environment variables. All are
+optional unless noted:
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | **Required.** OpenAI API key for embeddings and summaries. | – |
+| `US_PINECONE_KEY` | **Required.** Pinecone API key for index access. | – |
+| `PINECONE_INDEX` | Name of the index containing caselaw vectors. | `caselaw` |
+| `PINECONE_HOST` | Host URL for pod-based indexes. | Resolved by SDK |
+| `PINECONE_NAMESPACE` | Optional namespace to scope all queries. | `None` |
+| `BM25_ENCODER_PATH` | Filesystem path to BM25 encoder pickle. | `/content/drive/MyDrive/caselaw_pipeline/frozen_bm25.pkl` |
+| `OPENAI_EMBEDDING_MODEL` | Embedding model used for queries. | `text-embedding-3-large` |
+| `OPENAI_SUMMARY_MODEL` | Model used for summaries. | `gpt-4o-mini` |
+| `DEFAULT_TOP_K` | Default number of matches when `--top-k` is omitted. | `5` |
+
+Adjust these variables to match your environment (for example, when running in
+Google Colab with Google Drive mounted).
+
+## Uploading Your BM25 Encoder
+
+Because the pickled encoder can be large, it is not stored in this repository.
+Upload it separately (e.g., to Google Drive) and set `BM25_ENCODER_PATH` to the
+full path, such as:
+
+```python
+os.environ["BM25_ENCODER_PATH"] = "/content/drive/MyDrive/caselaw_pipeline/frozen_bm25.pkl"
+```
+
+When the file is present, the CLI automatically performs hybrid dense+sparse
+retrieval. If the file is missing, you will see a helpful error message.
+
+## Next Steps
+
+- Integrate the CLI into a larger pipeline or notebook for caselaw research.
+- Extend the metadata filters to support your custom schema.
+- Use the returned metadata to link back to the full-text opinions or docket
+  information stored elsewhere.
+
+Happy searching!
