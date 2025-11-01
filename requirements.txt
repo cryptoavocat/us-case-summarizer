@@ -1,0 +1,4 @@
+openai>=1.35.0
+pinecone-client>=3.0.0
+pinecone-text>=0.6.0
+orjson>=3.9.15
